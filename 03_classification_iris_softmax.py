@@ -1,39 +1,55 @@
 """
-03 - Classification: Softmax (multinomial logistic) regression on the Iris dataset.
+03 - Classification: Softmax Regression (multi-class logistic regression) on the
+     Iris dataset, trained with standard gradient descent.
 
-MATHEMATICS IMPLEMENTED HERE
-----------------------------
-Scores (logits) for C classes:
-    z_i = W^T x_i + b,      W in R^{p x C},  b in R^C
+----------------------------------------------------------------------
+THE MODEL
+----------------------------------------------------------------------
+With C classes we keep one weight vector and one bias per class, collected in
+a matrix W (p x C) and a vector b (length C):
 
-Softmax link (lecture 3-4):
-    p_ic = exp(z_ic) / sum_k exp(z_ik),      sum_c p_ic = 1,  p_ic in (0,1)
+    z_i = W^T x_i + b                    (C scores for sample i)
+    p_ic = softmax(z_i)_c = e^{z_ic} / sum_k e^{z_ik}
 
-Numerically stable form: subtract max_k z_ik before exponentiating; this leaves
-the softmax unchanged because exp(z-m)/sum exp(z-m) = exp(z)/sum exp(z).
+The probabilities are positive and sum to 1. The predicted class is the one
+with the largest probability.
 
-Loss (categorical cross-entropy with one-hot targets Y):
-    L = -(1/N) sum_i sum_c y_ic log p_ic
+A useful trick: subtracting the largest score from every score leaves the
+softmax unchanged, because the factor cancels in numerator and denominator.
+We always do this so that e^{...} can never overflow.
 
-Jacobian of the softmax:
-    dp_c / dz_k = p_c (delta_ck - p_k)
+----------------------------------------------------------------------
+THE LOSS: CATEGORICAL CROSS-ENTROPY
+----------------------------------------------------------------------
+Targets are one-hot: Y[i, c] = 1 for the true class of sample i, 0 otherwise.
 
-Chain rule through the softmax and the log gives the remarkably simple gradient
-of the cross-entropy with respect to the logits:
-    dL/dz_i = (p_i - y_i) / N
-and therefore
-    dL/dW = (1/N) X^T (P - Y),      dL/db = (1/N) 1^T (P - Y)
+    L = -(1/N) sum_i sum_c Y[i,c] log(p_ic)  +  lambda ||W||^2
 
-Optimisation: batch gradient descent
-    W <- W - eta dL/dW,   b <- b - eta dL/db
+Because only one entry of each row of Y is 1, this is just the average of
+-log(probability given to the correct class). If the model predicted every
+class equally, the loss would be log C.
 
-The cross-entropy of the softmax model is convex in (W, b), so gradient descent
-reaches a global optimum. The parameterisation is over-complete (adding the same
-vector to every column of W leaves P unchanged), which is why a small L2 term is
-included to pin down a unique solution.
+----------------------------------------------------------------------
+THE GRADIENT
+----------------------------------------------------------------------
+Differentiating the softmax and the logarithm together, everything cancels and
+leaves the same simple result as in binary logistic regression:
 
-Prediction: class = argmax_c p_c. Accuracy, per-class precision/recall and the
-confusion matrix are reported.
+    dL/dz = (P - Y)          (predicted probabilities minus one-hot targets)
+
+and then, since z = W^T x + b,
+
+    dL/dW = (1/N) X^T (P - Y) + 2 lambda W
+    dL/db = (1/N) column sums of (P - Y)
+
+----------------------------------------------------------------------
+TRAINING
+----------------------------------------------------------------------
+    W <- W - eta * dL/dW
+    b <- b - eta * dL/db
+
+A small L2 term is included because the parameters are otherwise not unique:
+adding the same vector to every column of W leaves all probabilities unchanged.
 """
 
 import argparse
@@ -53,79 +69,72 @@ FIGDIR = os.path.join(HERE, "figures")
 RESDIR = os.path.join(HERE, "results")
 
 
-# ----------------------------------------------------------------------
-# Core mathematics
-# ----------------------------------------------------------------------
+# ======================================================================
+# THE MATHEMATICS
+# ======================================================================
 def one_hot(y, C):
+    """Label 2 with C = 3 becomes the row [0, 0, 1]."""
     Y = np.zeros((len(y), C))
     Y[np.arange(len(y)), y] = 1.0
     return Y
 
 
 def softmax(Z):
-    """Row-wise, numerically stabilised softmax."""
+    """Row-wise softmax, with the row maximum subtracted for safety."""
     Z = Z - Z.max(axis=1, keepdims=True)
     E = np.exp(Z)
     return E / E.sum(axis=1, keepdims=True)
 
 
-def cross_entropy(P, Y, W=None, lam=0.0):
-    N = Y.shape[0]
-    L = -np.sum(Y * np.log(P + 1e-12)) / N
-    if W is not None and lam > 0:
-        L += lam * np.sum(W * W)
-    return float(L)
+def predict_proba(X, W, b):
+    """Forward pass: scores then probabilities."""
+    return softmax(X @ W + b)
 
 
-def grads(X, Y, W, b, lam=0.0):
-    """dL/dW = (1/N) X^T (P - Y) + 2 lam W ;  dL/db = (1/N) 1^T (P - Y)."""
+def cross_entropy(X, Y, W, b, lam):
+    """Categorical cross-entropy plus the L2 penalty."""
+    P = predict_proba(X, W, b)
+    loss = -np.sum(Y * np.log(P + 1e-12)) / Y.shape[0]
+    return float(loss + lam * np.sum(W ** 2))
+
+
+def gradients(X, Y, W, b, lam):
+    """dL/dW = (1/N) X^T (P - Y) + 2*lambda*W ;  dL/db = mean of (P - Y)."""
     N = X.shape[0]
-    P = softmax(X @ W + b)
-    D = (P - Y) / N
-    return X.T @ D + 2 * lam * W, D.sum(axis=0), P
+    P = predict_proba(X, W, b)
+    error = (P - Y) / N                       # this is dL/dz
+    grad_W = X.T @ error + 2 * lam * W
+    grad_b = error.sum(axis=0)
+    return grad_W, grad_b
 
 
-def fit(X, Y, eta=0.5, n_iter=4000, lam=1e-4, seed=0):
-    rng = np.random.default_rng(seed)
+def train(X, Y, eta, n_iter, lam):
+    """Gradient descent on W and b."""
     p, C = X.shape[1], Y.shape[1]
-    W = 0.01 * rng.standard_normal((p, C))
+    W = np.zeros((p, C))
     b = np.zeros(C)
-    hist = []
+    history = [cross_entropy(X, Y, W, b, lam)]
     for _ in range(n_iter):
-        gW, gb, P = grads(X, Y, W, b, lam)
-        W -= eta * gW
-        b -= eta * gb
-        hist.append(cross_entropy(P, Y, W, lam))
-    return W, b, np.array(hist)
-
-
-def gradient_check(X, Y, W, b, lam, eps=1e-6):
-    """Compare the analytic dL/dW with a central finite difference."""
-    gW, _, _ = grads(X, Y, W, b, lam)
-    num = np.zeros_like(W)
-    for i in range(W.shape[0]):
-        for j in range(W.shape[1]):
-            Wp, Wm = W.copy(), W.copy()
-            Wp[i, j] += eps
-            Wm[i, j] -= eps
-            Lp = cross_entropy(softmax(X @ Wp + b), Y, Wp, lam)
-            Lm = cross_entropy(softmax(X @ Wm + b), Y, Wm, lam)
-            num[i, j] = (Lp - Lm) / (2 * eps)
-    return float(np.max(np.abs(gW - num)))
+        grad_W, grad_b = gradients(X, Y, W, b, lam)
+        W = W - eta * grad_W
+        b = b - eta * grad_b
+        history.append(cross_entropy(X, Y, W, b, lam))
+    return W, b, np.array(history)
 
 
 def predict(X, W, b):
+    """Predicted class = the one with the largest score."""
     return np.argmax(X @ W + b, axis=1)
 
 
-def confusion(y, yhat, C):
+def confusion_matrix(y_true, y_pred, C):
     M = np.zeros((C, C), dtype=int)
-    for t, p in zip(y, yhat):
+    for t, p in zip(y_true, y_pred):
         M[t, p] += 1
     return M
 
 
-# ----------------------------------------------------------------------
+# ======================================================================
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--eta", type=float, default=0.5)
@@ -138,115 +147,110 @@ def main():
 
     data = load_iris()
     X, y = data.data, data.target
-    names, cls = list(data.feature_names), list(data.target_names)
-    C = len(cls)
+    names, class_names = list(data.feature_names), list(data.target_names)
+    C = len(class_names)
 
     print("=" * 72)
     print("03 | SOFTMAX REGRESSION  -  Iris dataset")
     print("=" * 72)
     print(f"Samples N = {X.shape[0]}, features p = {X.shape[1]}, classes C = {C}")
     print(f"Features: {', '.join(names)}")
-    print(f"Classes : {', '.join(cls)}  (counts: {np.bincount(y).tolist()})")
+    print(f"Classes : {', '.join(class_names)} "
+          f"(counts {np.bincount(y).tolist()})")
     print()
 
     X_tr, X_te, y_tr, y_te = train_test_split(
-        X, y, test_size=0.3, random_state=args.seed, stratify=y
-    )
-    mu, sd = X_tr.mean(0), X_tr.std(0)
-    Z_tr, Z_te = (X_tr - mu) / sd, (X_te - mu) / sd
+        X, y, test_size=0.3, random_state=args.seed, stratify=y)
+    mean, std = X_tr.mean(axis=0), X_tr.std(axis=0)
+    X_tr = (X_tr - mean) / std
+    X_te = (X_te - mean) / std
     Y_tr, Y_te = one_hot(y_tr, C), one_hot(y_te, C)
-    print(f"Train / test split: {len(y_tr)} / {len(y_te)} (stratified, standardised)")
+    print(f"Train / test split: {len(y_tr)} / {len(y_te)} "
+          "(stratified, features standardised)")
     print()
 
-    # --- gradient check ---------------------------------------------------
-    rng = np.random.default_rng(args.seed)
-    W0 = 0.3 * rng.standard_normal((X.shape[1], C))
-    b0 = 0.1 * rng.standard_normal(C)
-    err = gradient_check(Z_tr, Y_tr, W0, b0, args.lam)
+    # ---------------- training --------------------------------------------
     print("-" * 72)
-    print("(a) GRADIENT CHECK  analytic  X^T(P-Y)/N  vs central finite differences")
+    print(f"(a) TRAINING  (eta = {args.eta}, iterations = {args.iters}, "
+          f"lambda = {args.lam})")
     print("-" * 72)
-    print(f"max |analytic - numerical| = {err:.3e}  (should be ~1e-9 or smaller)")
-    # softmax sanity: rows sum to 1
-    Pchk = softmax(Z_tr @ W0 + b0)
-    print(f"max |row sum of softmax - 1| = {np.max(np.abs(Pchk.sum(1) - 1)):.3e}")
+    W, b, history = train(X_tr, Y_tr, args.eta, args.iters, args.lam)
+    print(f"{'iteration':>12}{'training loss':>16}")
+    for k in [0, 10, 100, 500, 1000, args.iters]:
+        print(f"{k:>12}{history[k]:>16.6f}")
+    print(f"\nAt iteration 0 all scores are zero, so every class gets probability")
+    print(f"1/3 and the loss is log 3 = {np.log(3):.6f}.")
+    print(f"Test loss after training: "
+          f"{cross_entropy(X_te, Y_te, W, b, 0.0):.6f}")
     print()
 
-    # --- training ---------------------------------------------------------
-    W, b, hist = fit(Z_tr, Y_tr, eta=args.eta, n_iter=args.iters,
-                     lam=args.lam, seed=args.seed)
-    print("-" * 72)
-    print(f"(b) TRAINING  (eta = {args.eta}, iterations = {args.iters}, lambda = {args.lam})")
-    print("-" * 72)
-    print(f"Initial cross-entropy      : {hist[0]:.6f}   (log C = {np.log(C):.6f} for uniform guessing)")
-    print(f"Final training cross-entropy: {hist[-1]:.6f}")
-    P_te = softmax(Z_te @ W + b)
-    print(f"Final test cross-entropy    : {cross_entropy(P_te, Y_te):.6f}")
-    print()
-    print("Learned weight matrix W (standardised features x classes):")
-    print(f"{'feature':>22}" + "".join(f"{c:>14}" for c in cls))
-    for n, row in zip(names, W):
-        print(f"{n:>22}" + "".join(f"{v:14.4f}" for v in row))
+    print("Learned weights (standardised features x classes):")
+    print(f"{'feature':>22}" + "".join(f"{c:>14}" for c in class_names))
+    for name, row in zip(names, W):
+        print(f"{name:>22}" + "".join(f"{v:14.4f}" for v in row))
     print(f"{'bias':>22}" + "".join(f"{v:14.4f}" for v in b))
     print()
 
-    # --- evaluation -------------------------------------------------------
-    yhat_tr, yhat_te = predict(Z_tr, W, b), predict(Z_te, W, b)
-    acc_tr = float(np.mean(yhat_tr == y_tr))
-    acc_te = float(np.mean(yhat_te == y_te))
-    M = confusion(y_te, yhat_te, C)
+    # ---------------- evaluation ------------------------------------------
+    y_pred_tr = predict(X_tr, W, b)
+    y_pred_te = predict(X_te, W, b)
+    acc_tr = float(np.mean(y_pred_tr == y_tr))
+    acc_te = float(np.mean(y_pred_te == y_te))
+    M = confusion_matrix(y_te, y_pred_te, C)
+
     print("-" * 72)
-    print("(c) PERFORMANCE")
+    print("(b) PERFORMANCE")
     print("-" * 72)
     print(f"Train accuracy = {acc_tr:.4f}    Test accuracy = {acc_te:.4f}")
-    print("\nConfusion matrix (rows = true, cols = predicted):")
-    print(f"{'':>12}" + "".join(f"{c:>12}" for c in cls))
-    for i, c in enumerate(cls):
+    print("\nTest confusion matrix (rows = true, columns = predicted):")
+    print(f"{'':>12}" + "".join(f"{c:>12}" for c in class_names))
+    for i, c in enumerate(class_names):
         print(f"{c:>12}" + "".join(f"{v:12d}" for v in M[i]))
-    print("\nPer-class precision / recall / F1 (test):")
-    per = {}
-    for i, c in enumerate(cls):
+    print("\nPer-class precision / recall / F1:")
+    per_class = {}
+    for i, c in enumerate(class_names):
         tp = M[i, i]
-        prec = tp / M[:, i].sum() if M[:, i].sum() else 0.0
-        rec = tp / M[i].sum() if M[i].sum() else 0.0
-        f1 = 2 * prec * rec / (prec + rec) if prec + rec else 0.0
-        per[c] = {"precision": float(prec), "recall": float(rec), "f1": float(f1)}
-        print(f"   {c:>12}: precision = {prec:.4f}, recall = {rec:.4f}, F1 = {f1:.4f}")
+        precision = tp / M[:, i].sum() if M[:, i].sum() else 0.0
+        recall = tp / M[i].sum() if M[i].sum() else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+        per_class[c] = {"precision": float(precision), "recall": float(recall),
+                        "f1": float(f1)}
+        print(f"   {c:>12}: precision = {precision:.4f}, "
+              f"recall = {recall:.4f}, F1 = {f1:.4f}")
     print()
 
-    # --- plots ------------------------------------------------------------
+    # ---------------- plots ------------------------------------------------
     fig, ax = plt.subplots(1, 2, figsize=(10, 4))
-    ax[0].plot(hist, lw=1.6)
-    ax[0].axhline(np.log(C), color="gray", ls=":", lw=1, label=r"$\log C$ (chance)")
+    ax[0].plot(history, lw=1.6)
+    ax[0].axhline(np.log(C), color="gray", ls=":", lw=1,
+                  label=r"$\log C$ (equal probabilities)")
     ax[0].set_xlabel("iteration")
     ax[0].set_ylabel("cross-entropy")
-    ax[0].set_title(rf"Softmax regression training, $\eta={args.eta}$")
+    ax[0].set_title(rf"Training loss, $\eta = {args.eta}$")
     ax[0].legend()
     ax[0].grid(alpha=0.3)
     im = ax[1].imshow(M, cmap="Blues")
-    ax[1].set_xticks(range(C), cls, rotation=30)
-    ax[1].set_yticks(range(C), cls)
+    ax[1].set_xticks(range(C), class_names, rotation=30)
+    ax[1].set_yticks(range(C), class_names)
     for i in range(C):
         for j in range(C):
             ax[1].text(j, i, M[i, j], ha="center", va="center",
                        color="white" if M[i, j] > M.max() / 2 else "black")
     ax[1].set_xlabel("predicted")
     ax[1].set_ylabel("true")
-    ax[1].set_title(f"Test confusion matrix (acc = {acc_te:.3f})")
+    ax[1].set_title(f"Test confusion matrix (accuracy = {acc_te:.3f})")
     fig.colorbar(im, ax=ax[1], fraction=0.046)
     fig.tight_layout()
     f1p = os.path.join(FIGDIR, "03_iris_training.pdf")
     fig.savefig(f1p)
     plt.close(fig)
 
-    # decision regions using the two petal features only
+    # decision regions using only the two petal measurements
     j1, j2 = 2, 3
-    W2, b2, _ = fit(Z_tr[:, [j1, j2]], Y_tr, eta=args.eta,
-                    n_iter=args.iters, lam=args.lam, seed=args.seed)
+    W2, b2, _ = train(X_tr[:, [j1, j2]], Y_tr, args.eta, args.iters, args.lam)
     gx, gy = np.meshgrid(
-        np.linspace(Z_tr[:, j1].min() - 1, Z_tr[:, j1].max() + 1, 300),
-        np.linspace(Z_tr[:, j2].min() - 1, Z_tr[:, j2].max() + 1, 300),
-    )
+        np.linspace(X_tr[:, j1].min() - 1, X_tr[:, j1].max() + 1, 300),
+        np.linspace(X_tr[:, j2].min() - 1, X_tr[:, j2].max() + 1, 300))
     grid = np.c_[gx.ravel(), gy.ravel()]
     zz = predict(grid, W2, b2).reshape(gx.shape)
     fig, ax = plt.subplots(figsize=(5.5, 4.5))
@@ -254,10 +258,11 @@ def main():
                 colors=["tab:blue", "tab:orange", "tab:green"])
     for c in range(C):
         m = y_tr == c
-        ax.scatter(Z_tr[m, j1], Z_tr[m, j2], s=22, label=cls[c], edgecolor="k", lw=0.3)
+        ax.scatter(X_tr[m, j1], X_tr[m, j2], s=22, label=class_names[c],
+                   edgecolor="k", lw=0.3)
     ax.set_xlabel(f"{names[j1]} (standardised)")
     ax.set_ylabel(f"{names[j2]} (standardised)")
-    ax.set_title("Softmax decision regions (linear boundaries)")
+    ax.set_title("Decision regions (the boundaries are straight lines)")
     ax.legend()
     fig.tight_layout()
     f2p = os.path.join(FIGDIR, "03_iris_decision_regions.pdf")
@@ -266,11 +271,11 @@ def main():
 
     with open(os.path.join(RESDIR, "03_iris.json"), "w") as fh:
         json.dump({"train_acc": acc_tr, "test_acc": acc_te,
-                   "train_ce": float(hist[-1]),
-                   "test_ce": cross_entropy(P_te, Y_te),
-                   "grad_check_max_err": err,
-                   "confusion": M.tolist(), "per_class": per,
-                   "classes": cls}, fh, indent=2)
+                   "train_loss": float(history[-1]),
+                   "test_loss": cross_entropy(X_te, Y_te, W, b, 0.0),
+                   "confusion": M.tolist(), "per_class": per_class,
+                   "classes": class_names, "eta": args.eta,
+                   "iterations": args.iters, "lam": args.lam}, fh, indent=2)
     print(f"Figures saved: {f1p}")
     print(f"               {f2p}")
     print(f"Results saved: {os.path.join(RESDIR, '03_iris.json')}")

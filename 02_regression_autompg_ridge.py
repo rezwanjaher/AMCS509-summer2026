@@ -1,37 +1,56 @@
 """
-02 - Regression: Ridge (L2-regularised) Linear Regression on the Auto MPG dataset.
+02 - Regression: Ridge Regression (linear regression with an L2 penalty) on the
+     Auto MPG dataset (UCI). The script downloads a clean CSV copy of the data
+     and caches it in ./data.
 
-Original source: UCI Machine Learning Repository, dataset 9 (auto+mpg).
-The script downloads a clean CSV mirror of the same data and caches it in ./data.
+----------------------------------------------------------------------
+WHY RIDGE HERE
+----------------------------------------------------------------------
+The predictors of fuel efficiency are strongly related to one another: heavier
+cars have bigger engines and more cylinders. When columns of X are nearly
+proportional, X^T X is close to singular, the plain least-squares solution
+becomes unstable, and individual coefficients can be huge and of opposite sign.
+Adding an L2 penalty fixes this.
 
-MATHEMATICS IMPLEMENTED HERE
-----------------------------
-Standardisation (feature transformation, lecture 7-8):
-    z_j = (x_j - mu_j) / sigma_j
-Needed because the ridge penalty is not scale invariant.
+----------------------------------------------------------------------
+STANDARDISATION
+----------------------------------------------------------------------
+    z_j = (x_j - mean_j) / std_j
+computed on the TRAINING data only. Needed because the penalty below depends
+on the size of the weights, which depends on the units of the features.
 
-Ridge objective (MSE + L2 regularisation):
-    L(w, b) = (1/N) ||y - Xw - b1||^2 + lambda ||w||^2
+----------------------------------------------------------------------
+THE MODEL AND THE LOSS
+----------------------------------------------------------------------
+    y_hat = w^T z + b
 
-Gradients:
-    dL/dw = -(2/N) X^T (y - Xw - b1) + 2 lambda w
-    dL/db = -(2/N) 1^T (y - Xw - b1)
+    L(w, b) = (1/N) ||y - Zw - b||^2 + lambda ||w||^2
 
-Setting dL/db = 0 gives b = mean(y) - mean(x)^T w, so after centring y and X the
-intercept drops out. Setting dL/dw = 0 then gives the closed form
+The first term is the usual mean squared error; the second shrinks the weights
+towards zero. lambda = 0 gives ordinary least squares.
 
-    w_hat = (X^T X + N lambda I)^{-1} X^T y                (centred X, y)
+----------------------------------------------------------------------
+THE CLOSED-FORM SOLUTION
+----------------------------------------------------------------------
+Differentiating with respect to b and setting it to zero gives
+b = mean(y) - mean(z)^T w, so if we CENTRE y and Z first, the intercept
+disappears from the problem. Differentiating with respect to w:
 
-Why ridge:
-  * X^T X + N lambda I is always invertible (lambda > 0), even when features are
-    collinear - here weight, displacement and #cylinders are strongly correlated.
-  * Shrinkage trades a little bias for a large variance reduction.
-  * Bayesian reading: ridge is the MAP estimate with a Gaussian prior
-    w ~ N(0, tau^2 I) and Gaussian noise, with lambda = sigma^2 / (N tau^2).
+    dL/dw = -(2/N) Z^T (y - Zw) + 2 lambda w = 0
 
-lambda is selected by k-fold cross-validation on the training split.
+    =>   w = (Z^T Z + N lambda I)^{-1} Z^T y
 
-Metrics: MSE, RMSE, MAE, R^2.
+Note the +N*lambda*I: it lifts every diagonal entry, which is exactly what
+makes the matrix invertible even when the columns are collinear. The bias b is
+recovered afterwards from the means and is never penalised.
+
+----------------------------------------------------------------------
+CHOOSING LAMBDA
+----------------------------------------------------------------------
+lambda cannot be chosen on the training error (larger lambda always increases
+it). We split the training data into a smaller training part and a validation
+part, fit with several values of lambda, and keep the one with the lowest
+validation error.
 """
 
 import argparse
@@ -53,9 +72,9 @@ DATADIR = os.path.join(HERE, "data")
 URL = "https://raw.githubusercontent.com/mwaskom/seaborn-data/master/mpg.csv"
 
 
-# ----------------------------------------------------------------------
-# Data
-# ----------------------------------------------------------------------
+# ======================================================================
+# DATA
+# ======================================================================
 def load_autompg():
     os.makedirs(DATADIR, exist_ok=True)
     path = os.path.join(DATADIR, "auto_mpg.csv")
@@ -64,76 +83,60 @@ def load_autompg():
         urllib.request.urlretrieve(URL, path)
     df = pd.read_csv(path)
     n_raw = len(df)
-    df = df.dropna().reset_index(drop=True)
-    feats = ["cylinders", "displacement", "horsepower", "weight",
-             "acceleration", "model_year"]
-    X = df[feats].to_numpy(dtype=float)
-    # one-hot encoding of the categorical 'origin' (drop first level)
+    df = df.dropna().reset_index(drop=True)       # six rows lack horsepower
+    features = ["cylinders", "displacement", "horsepower", "weight",
+                "acceleration", "model_year"]
+    X = df[features].to_numpy(dtype=float)
+    # 'origin' is a category (USA / Europe / Japan), so turn it into 0/1 columns
     origin = pd.get_dummies(df["origin"], prefix="origin", drop_first=True)
     X = np.hstack([X, origin.to_numpy(dtype=float)])
-    names = feats + list(origin.columns)
+    names = features + list(origin.columns)
     y = df["mpg"].to_numpy(dtype=float)
     return X, y, names, n_raw
 
 
-# ----------------------------------------------------------------------
-# Core mathematics
-# ----------------------------------------------------------------------
-def standardise(X, mu=None, sd=None):
-    if mu is None:
-        mu, sd = X.mean(axis=0), X.std(axis=0)
-        sd[sd == 0] = 1.0
-    return (X - mu) / sd, mu, sd
+# ======================================================================
+# THE MATHEMATICS
+# ======================================================================
+def standardise(X, mean=None, std=None):
+    """z = (x - mean) / std. Statistics come from the training set."""
+    if mean is None:
+        mean, std = X.mean(axis=0), X.std(axis=0)
+        std[std == 0] = 1.0
+    return (X - mean) / std, mean, std
 
 
-def ridge_fit(X, y, lam):
-    """w = (X^T X + N lam I)^{-1} X^T y on centred data; b recovered afterwards."""
-    N, p = X.shape
-    xbar, ybar = X.mean(axis=0), y.mean()
-    Xc, yc = X - xbar, y - ybar
-    A = Xc.T @ Xc + N * lam * np.eye(p)
-    w = np.linalg.solve(A, Xc.T @ yc)
-    b = ybar - xbar @ w
+def ridge_fit(Z, y, lam):
+    """w = (Z^T Z + N lambda I)^{-1} Z^T y on centred data; then recover b."""
+    N, p = Z.shape
+    z_mean, y_mean = Z.mean(axis=0), y.mean()
+    Zc, yc = Z - z_mean, y - y_mean               # centre, so b drops out
+    A = Zc.T @ Zc + N * lam * np.eye(p)
+    w = np.linalg.solve(A, Zc.T @ yc)
+    b = y_mean - z_mean @ w
     return w, b
 
 
-def predict(X, w, b):
-    return X @ w + b
+def predict(Z, w, b):
+    return Z @ w + b
 
 
-def mse(y, p):
-    return float(np.mean((y - p) ** 2))
+def mse(y, y_hat):
+    return float(np.mean((y - y_hat) ** 2))
 
 
-def mae(y, p):
-    return float(np.mean(np.abs(y - p)))
+def mae(y, y_hat):
+    return float(np.mean(np.abs(y - y_hat)))
 
 
-def r2(y, p):
-    return float(1 - np.sum((y - p) ** 2) / np.sum((y - y.mean()) ** 2))
+def r2_score(y, y_hat):
+    return float(1 - np.sum((y - y_hat) ** 2) / np.sum((y - y.mean()) ** 2))
 
 
-def kfold_cv(X, y, lam, k=5, seed=0):
-    """k-fold CV estimate of the test MSE for one lambda."""
-    rng = np.random.default_rng(seed)
-    idx = rng.permutation(len(y))
-    folds = np.array_split(idx, k)
-    errs = []
-    for i in range(k):
-        va = folds[i]
-        tr = np.concatenate([folds[j] for j in range(k) if j != i])
-        Xtr, mu, sd = standardise(X[tr])
-        Xva, _, _ = standardise(X[va], mu, sd)
-        w, b = ridge_fit(Xtr, y[tr], lam)
-        errs.append(mse(y[va], predict(Xva, w, b)))
-    return float(np.mean(errs))
-
-
-# ----------------------------------------------------------------------
+# ======================================================================
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--folds", type=int, default=5)
     args = ap.parse_args()
     os.makedirs(FIGDIR, exist_ok=True)
     os.makedirs(RESDIR, exist_ok=True)
@@ -142,93 +145,110 @@ def main():
     print("=" * 72)
     print("02 | RIDGE REGRESSION  -  Auto MPG dataset")
     print("=" * 72)
-    print(f"Rows in raw file        : {n_raw}")
-    print(f"Rows after dropping NaN : {X.shape[0]}   (missing horsepower values)")
+    print(f"Rows in the raw file       : {n_raw}")
+    print(f"Rows after dropping missing: {X.shape[0]}")
     print(f"Features p = {X.shape[1]}: {', '.join(names)}")
-    print(f"Target: mpg,  mean = {y.mean():.3f}, std = {y.std():.3f}")
+    print(f"Target: mpg,  mean = {y.mean():.2f}, standard deviation = {y.std():.2f}")
     print()
 
     rng = np.random.default_rng(args.seed)
     idx = rng.permutation(len(y))
-    ntr = int(0.8 * len(y))
-    tr, te = idx[:ntr], idx[ntr:]
-    X_tr, y_tr, X_te, y_te = X[tr], y[tr], X[te], y[te]
-    print(f"Train / test split: {len(tr)} / {len(te)}")
+    n_test = int(0.2 * len(y))
+    n_val = int(0.2 * len(y))
+    test_idx = idx[:n_test]
+    val_idx = idx[n_test:n_test + n_val]
+    train_idx = idx[n_test + n_val:]
 
-    # collinearity diagnostic on standardised features
-    Z_tr, mu, sd = standardise(X_tr)
-    Z_te, _, _ = standardise(X_te, mu, sd)
-    G = Z_tr.T @ Z_tr
-    print(f"Condition number of Z^T Z (lambda = 0) : {np.linalg.cond(G):.3e}")
+    X_tr, y_tr = X[train_idx], y[train_idx]
+    X_va, y_va = X[val_idx], y[val_idx]
+    X_te, y_te = X[test_idx], y[test_idx]
+    print(f"Train / validation / test: {len(train_idx)} / {len(val_idx)} / {len(test_idx)}")
+
+    Z_tr, mean, std = standardise(X_tr)
+    Z_va, _, _ = standardise(X_va, mean, std)
+    Z_te, _, _ = standardise(X_te, mean, std)
+    print("Features standardised with the training mean and standard deviation.")
+    print()
+
+    # show the collinearity that motivates the penalty
     C = np.corrcoef(Z_tr, rowvar=False)
-    print("Strongest feature correlations (|r| > 0.8):")
+    print("Strongly correlated feature pairs (|correlation| > 0.8):")
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
             if abs(C[i, j]) > 0.8:
-                print(f"   corr({names[i]}, {names[j]}) = {C[i, j]:+.3f}")
+                print(f"   {names[i]} and {names[j]} : {C[i, j]:+.3f}")
     print()
 
-    # --- lambda selection by k-fold CV -----------------------------------
-    lams = np.logspace(-6, 2, 41)
-    cv = np.array([kfold_cv(X_tr, y_tr, l, k=args.folds, seed=args.seed) for l in lams])
-    lam_star = float(lams[np.argmin(cv)])
+    # ---------------- choose lambda on the validation set ------------------
+    lambdas = np.logspace(-6, 2, 17)
+    val_errors = []
     print("-" * 72)
-    print(f"({args.folds}-fold cross-validation over lambda)")
+    print("(a) CHOOSING LAMBDA ON THE VALIDATION SET")
     print("-" * 72)
-    for l, e in zip(lams[::5], cv[::5]):
-        print(f"   lambda = {l:10.2e}   CV MSE = {e:8.4f}")
-    print(f"Selected lambda* = {lam_star:.4e}   (CV MSE = {cv.min():.4f})")
+    print(f"{'lambda':>12}{'validation MSE':>18}")
+    for lam in lambdas:
+        w, b = ridge_fit(Z_tr, y_tr, lam)
+        err = mse(y_va, predict(Z_va, w, b))
+        val_errors.append(err)
+        print(f"{lam:>12.1e}{err:>18.4f}")
+    val_errors = np.array(val_errors)
+    best_lambda = float(lambdas[np.argmin(val_errors)])
+    print(f"\nBest lambda = {best_lambda:.1e} "
+          f"(validation MSE = {val_errors.min():.4f})")
     print()
 
-    # --- final fit --------------------------------------------------------
-    w_ols, b_ols = ridge_fit(Z_tr, y_tr, 0.0)
-    w, b = ridge_fit(Z_tr, y_tr, lam_star)
+    # ---------------- final models ----------------------------------------
+    w_ols, b_ols = ridge_fit(Z_tr, y_tr, 0.0)          # lambda = 0
+    w, b = ridge_fit(Z_tr, y_tr, best_lambda)
+
     print("-" * 72)
-    print("Coefficients on standardised features (mpg per 1 s.d. of the feature)")
+    print("(b) COEFFICIENTS (change in mpg per one standard deviation)")
     print("-" * 72)
     print(f"{'feature':>16}{'OLS':>12}{'ridge':>12}")
-    for n, a, c in zip(names, w_ols, w):
-        print(f"{n:>16}{a:12.4f}{c:12.4f}")
+    for name, a, c in zip(names, w_ols, w):
+        print(f"{name:>16}{a:12.4f}{c:12.4f}")
     print(f"{'intercept':>16}{b_ols:12.4f}{b:12.4f}")
-    print(f"||w||_2 : OLS = {np.linalg.norm(w_ols):.4f}, ridge = {np.linalg.norm(w):.4f}  (shrinkage)")
+    print(f"\nSize of the weight vector ||w||: "
+          f"OLS = {np.linalg.norm(w_ols):.4f}, ridge = {np.linalg.norm(w):.4f}")
+    print("The ridge weights are smaller - that is the shrinkage the penalty buys.")
     print()
 
-    out = {}
+    results = {}
     for tag, (ww, bb) in {"ols": (w_ols, b_ols), "ridge": (w, b)}.items():
         p_tr, p_te = predict(Z_tr, ww, bb), predict(Z_te, ww, bb)
-        out[tag] = {
-            "train_mse": mse(y_tr, p_tr), "test_mse": mse(y_te, p_te),
-            "test_rmse": float(np.sqrt(mse(y_te, p_te))),
-            "test_mae": mae(y_te, p_te),
-            "train_r2": r2(y_tr, p_tr), "test_r2": r2(y_te, p_te),
-        }
+        results[tag] = {"train_mse": mse(y_tr, p_tr), "test_mse": mse(y_te, p_te),
+                        "test_rmse": float(np.sqrt(mse(y_te, p_te))),
+                        "test_mae": mae(y_te, p_te),
+                        "train_r2": r2_score(y_tr, p_tr),
+                        "test_r2": r2_score(y_te, p_te)}
     print("-" * 72)
-    print("PERFORMANCE")
+    print("(c) PERFORMANCE")
     print("-" * 72)
-    print(f"{'model':<8}{'train MSE':>12}{'test MSE':>12}{'test RMSE':>12}{'test MAE':>11}{'test R^2':>10}")
+    print(f"{'model':<8}{'train MSE':>12}{'test MSE':>12}"
+          f"{'test RMSE':>12}{'test MAE':>11}{'test R^2':>10}")
     for tag in ("ols", "ridge"):
-        m = out[tag]
+        m = results[tag]
         print(f"{tag:<8}{m['train_mse']:12.4f}{m['test_mse']:12.4f}"
               f"{m['test_rmse']:12.4f}{m['test_mae']:11.4f}{m['test_r2']:10.4f}")
     print()
 
-    # --- plots ------------------------------------------------------------
-    path = np.array([ridge_fit(Z_tr, y_tr, l)[0] for l in lams])
+    # ---------------- plots -------------------------------------------------
+    coefficient_paths = np.array([ridge_fit(Z_tr, y_tr, lam)[0] for lam in lambdas])
     fig, ax = plt.subplots(1, 2, figsize=(11, 4))
-    ax[0].semilogx(lams, cv, "o-", ms=3)
-    ax[0].axvline(lam_star, color="crimson", ls="--", lw=1,
-                  label=rf"$\lambda^*={lam_star:.2e}$")
+    ax[0].semilogx(lambdas, val_errors, "o-", ms=4)
+    ax[0].axvline(best_lambda, color="crimson", ls="--", lw=1,
+                  label=rf"best $\lambda = {best_lambda:.1e}$")
     ax[0].set_xlabel(r"$\lambda$")
-    ax[0].set_ylabel(f"{args.folds}-fold CV MSE")
-    ax[0].set_title("Cross-validated model selection")
+    ax[0].set_ylabel("validation MSE")
+    ax[0].set_title("Choosing the penalty strength")
     ax[0].legend()
     ax[0].grid(alpha=0.3)
-    for j, n in enumerate(names):
-        ax[1].semilogx(lams, path[:, j], label=n, lw=1.4)
-    ax[1].axvline(lam_star, color="crimson", ls="--", lw=1)
+    for j, name in enumerate(names):
+        ax[1].semilogx(lambdas, coefficient_paths[:, j], label=name, lw=1.4)
+    ax[1].axvline(best_lambda, color="crimson", ls="--", lw=1)
     ax[1].set_xlabel(r"$\lambda$")
-    ax[1].set_ylabel(r"$w_j(\lambda)$")
-    ax[1].set_title("Ridge coefficient paths (shrinkage)")
+    ax[1].set_ylabel(r"$w_j$")
+    ax[1].set_title("Weights shrink as $\\lambda$ grows")
     ax[1].legend(fontsize=6, ncol=2)
     ax[1].grid(alpha=0.3)
     fig.tight_layout()
@@ -243,12 +263,12 @@ def main():
     ax[0].plot(lims, lims, "k--", lw=1)
     ax[0].set_xlabel("true mpg")
     ax[0].set_ylabel("predicted mpg")
-    ax[0].set_title(f"Test set, $R^2$ = {out['ridge']['test_r2']:.3f}")
+    ax[0].set_title(f"Test set, $R^2$ = {results['ridge']['test_r2']:.3f}")
     ax[0].grid(alpha=0.3)
     ax[1].hist(y_te - p_te, bins=20, edgecolor="k", alpha=0.8)
-    ax[1].set_xlabel(r"residual $y-\hat{y}$ (mpg)")
+    ax[1].set_xlabel(r"residual $y - \hat{y}$ (mpg)")
     ax[1].set_ylabel("count")
-    ax[1].set_title("Residual distribution")
+    ax[1].set_title("Residuals")
     ax[1].grid(alpha=0.3)
     fig.tight_layout()
     f2 = os.path.join(FIGDIR, "02_autompg_fit.pdf")
@@ -256,11 +276,11 @@ def main():
     plt.close(fig)
 
     with open(os.path.join(RESDIR, "02_autompg.json"), "w") as fh:
-        json.dump({"metrics": out, "lambda_star": lam_star,
-                   "cv_mse_min": float(cv.min()),
+        json.dump({"metrics": results, "best_lambda": best_lambda,
+                   "validation_mse_min": float(val_errors.min()),
                    "coefficients_ridge": {n: float(v) for n, v in zip(names, w)},
-                   "coefficients_ols": {n: float(v) for n, v in zip(names, w_ols)},
-                   "cond_ZtZ": float(np.linalg.cond(G))}, fh, indent=2)
+                   "coefficients_ols": {n: float(v) for n, v in zip(names, w_ols)}},
+                  fh, indent=2)
     print(f"Figures saved: {f1}")
     print(f"               {f2}")
     print(f"Results saved: {os.path.join(RESDIR, '02_autompg.json')}")

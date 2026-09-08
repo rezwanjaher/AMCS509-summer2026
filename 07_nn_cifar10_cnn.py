@@ -1,72 +1,62 @@
 """
-07 - Neural network: a CONVOLUTIONAL neural network (CNN) written from scratch
-     in NumPy and trained on CIFAR-10 (University of Toronto, 10 classes of
-     32x32 colour images).
+07 - Neural network: a small Convolutional Neural Network (CNN) written from
+     scratch in NumPy and trained on CIFAR-10 (10 classes of 32x32 colour
+     images).
 
-Data: the script first tries the official CIFAR-10 python archive from
-cs.toronto.edu; if that host is unreachable it falls back to a GitHub mirror of
-the same images (requires `pillow`). Either way the arrays are cached as an
-.npz in ./data so later runs are instant.
-
+======================================================================
 ARCHITECTURE
-------------
-    input 3x32x32
-      conv1 : 16 filters 3x3, pad 1  -> ReLU -> maxpool 2x2   (16x16x16)
-      conv2 : 32 filters 3x3, pad 1  -> ReLU -> maxpool 2x2   (32x8x8)
-      flatten (2048) -> dense 128 -> ReLU -> dense 10 -> softmax
+======================================================================
+    input 3 x 32 x 32
+      convolution: 16 filters of size 3x3   -> ReLU -> 2x2 max pooling  (16x16x16)
+      convolution: 32 filters of size 3x3   -> ReLU -> 2x2 max pooling  (32x8x8)
+      flatten (2048) -> dense(128) -> ReLU -> dense(10) -> softmax
 
-MATHEMATICS IMPLEMENTED HERE
-----------------------------
-1. The convolution (strictly, cross-correlation) of an input a with a filter W:
+======================================================================
+1. WHAT A CONVOLUTION IS
+======================================================================
+A filter is a small block of weights that slides over the image. At every
+position we multiply the filter by the patch underneath it and add up:
 
-       z[f, i, j] = sum_{c, u, v} W[f, c, u, v] * a[c, i+u, j+v] + b[f]
+    z[f, i, j] = sum_c sum_u sum_v  W[f, c, u, v] * a[c, i+u, j+v]  +  b[f]
 
-   Compare with the dense layer z = W a + b of script 05. A convolution IS a
-   dense layer whose weight matrix is constrained in two ways:
-     * sparsity   - z[f,i,j] depends only on a small patch of a, not on all of it;
-     * weight tying - the SAME W[f] is used at every spatial position (i, j).
-   Consequences: the layer is equivariant to translation (shifting the input
-   shifts the output), and the parameter count no longer grows with image size.
-   Here conv1 has 16*3*3*3 + 16 = 448 parameters; a dense layer with the same
-   3072 inputs and 16384 outputs would need 5.0e+7.
+Compare this with the dense layer z = Wx + b of script 05. A convolution is a
+dense layer with two restrictions:
+  * each output looks at a small 3x3 patch instead of the whole image;
+  * the SAME filter is used at every position (the weights are shared).
+Because of that, the filter has only 3*3*3 = 27 weights no matter how big the
+image is, and a pattern is recognised wherever it appears.
 
-2. im2col. Writing the patch centred on each output position as a row of a
-   matrix "col" of shape (N*H_out*W_out, C*k*k) turns the convolution into one
-   matrix product
+Implementation note: instead of looping over the 32x32 output positions in
+Python (slow), we loop over the 9 positions INSIDE the filter and shift the
+image with a slice. The two are the same sum, just added in a different order.
 
-       Z = col @ W_row^T + b,        W_row of shape (F, C*k*k)
+======================================================================
+2. BACKWARD PASS FOR A CONVOLUTION
+======================================================================
+With delta = dL/dz for this layer, and the same 9 filter offsets:
 
-   which is exactly the dense layer of script 05. Every gradient below then
-   follows from the dense-layer rules already derived.
+    dW[f, c, u, v] += sum over batch and positions of delta[f,i,j]*a[c,i+u,j+v]
+    db[f]          += sum of delta[f, :, :]
+    da[c, i+u, j+v] += sum_f W[f, c, u, v] * delta[f, i, j]
 
-3. Backward pass through the convolution. With delta = dL/dZ (reshaped to the
-   same (N*H_out*W_out, F) layout),
+The "+=" appears because a shared weight is used many times, so the chain rule
+adds up one contribution per use - and because neighbouring patches overlap, a
+pixel receives gradient from several output positions.
 
-       dL/dW_row = delta^T @ col
-       dL/db     = column sums of delta
-       dL/dcol   = delta @ W_row
+======================================================================
+3. MAX POOLING
+======================================================================
+Take the largest value in each 2x2 block. The derivative of a maximum is 1 for
+the entry that WAS the maximum and 0 for the others, so the backward pass sends
+the gradient only to the winning position. Pooling has no weights; it halves
+the image size and makes the next layer see a wider area.
 
-   and dL/dcol is scattered back to image coordinates by col2im. Because weight
-   tying means one weight is used at many positions, dL/dW_row is a SUM over all
-   positions and all samples - the multivariable chain rule again, exactly as in
-   the recurrent network of script 06 where the sum runs over time instead of
-   space. Overlapping patches also make col2im ACCUMULATE (+=) rather than
-   assign: a pixel used by several output positions receives the sum of their
-   gradients.
-
-4. Max pooling: y = max over each 2x2 window. The derivative routes the incoming
-   gradient to the arg-max position only and sends zero elsewhere,
-
-       dL/da[c,i,j] = dL/dy[c,p,q]  if (i,j) = argmax of window (p,q), else 0.
-
-   Pooling has no parameters; it discards spatial precision in exchange for a
-   larger receptive field and fewer downstream activations.
-
-5. Output layer and loss are unchanged from script 05: softmax with categorical
-   cross-entropy, so delta at the output is again (P - Y)/B.
-
-The analytic gradients of every layer are verified against central finite
-differences before training.
+======================================================================
+4. LOSS AND UPDATE
+======================================================================
+Softmax output with cross-entropy loss, exactly as in script 05, so at the
+output layer delta = (P - Y) / B. Training is plain mini-batch gradient
+descent:  W <- W - eta * dW.
 """
 
 import argparse
@@ -95,26 +85,25 @@ CLASSES = ["airplane", "automobile", "bird", "cat", "deer",
            "dog", "frog", "horse", "ship", "truck"]
 
 
-# ----------------------------------------------------------------------
-# Data
-# ----------------------------------------------------------------------
+# ======================================================================
+# DATA
+# ======================================================================
 def _from_official():
     tgz = os.path.join(DATADIR, "cifar-10-python.tar.gz")
     if not os.path.exists(tgz):
-        print(f"  trying official source {OFFICIAL} ...")
+        print(f"  downloading {OFFICIAL} ...")
         urllib.request.urlretrieve(OFFICIAL, tgz)
     with tarfile.open(tgz) as tf:
-        def rd(name):
+        def read(name):
             return pickle.load(tf.extractfile(name), encoding="bytes")
-        Xtr, ytr = [], []
+        X_train, y_train = [], []
         for k in range(1, 6):
-            d = rd(f"cifar-10-batches-py/data_batch_{k}")
-            Xtr.append(d[b"data"])
-            ytr += d[b"labels"]
-        d = rd("cifar-10-batches-py/test_batch")
-    Xtr = np.concatenate(Xtr).reshape(-1, 3, 32, 32)
-    Xte = d[b"data"].reshape(-1, 3, 32, 32)
-    return Xtr, np.array(ytr), Xte, np.array(d[b"labels"])
+            batch = read(f"cifar-10-batches-py/data_batch_{k}")
+            X_train.append(batch[b"data"])
+            y_train += batch[b"labels"]
+        test = read("cifar-10-batches-py/test_batch")
+    return (np.concatenate(X_train).reshape(-1, 3, 32, 32), np.array(y_train),
+            test[b"data"].reshape(-1, 3, 32, 32), np.array(test[b"labels"]))
 
 
 def _from_mirror():
@@ -122,16 +111,16 @@ def _from_mirror():
     import matplotlib.image as mpimg
     repo = os.path.join(DATADIR, "cifar10_png")
     if not os.path.isdir(repo):
-        print(f"  official host unreachable; cloning mirror {MIRROR} ...")
-        subprocess.run(["git", "clone", "--depth", "1", "-q", MIRROR, repo], check=True)
+        print(f"  official host unreachable; cloning {MIRROR} ...")
+        subprocess.run(["git", "clone", "--depth", "1", "-q", MIRROR, repo],
+                       check=True)
     out = {}
     for split in ("train", "test"):
         X, y = [], []
-        for c, name in enumerate(CLASSES):
-            files = sorted(glob.glob(os.path.join(repo, split, name, "*")))
-            for f in files:
+        for label, name in enumerate(CLASSES):
+            for f in sorted(glob.glob(os.path.join(repo, split, name, "*"))):
                 X.append(mpimg.imread(f))
-                y.append(c)
+                y.append(label)
         out[split] = (np.array(X).transpose(0, 3, 1, 2), np.array(y))
     return out["train"][0], out["train"][1], out["test"][0], out["test"][1]
 
@@ -143,20 +132,32 @@ def load_cifar10():
         return z["Xtr"], z["ytr"], z["Xte"], z["yte"]
     try:
         Xtr, ytr, Xte, yte = _from_official()
-    except Exception as exc:                       # blocked host, no internet, ...
+    except Exception as exc:
         print(f"  official download failed ({type(exc).__name__}); using mirror")
         Xtr, ytr, Xte, yte = _from_mirror()
     np.savez_compressed(CACHE, Xtr=Xtr, ytr=ytr, Xte=Xte, yte=yte)
     return Xtr, ytr, Xte, yte
 
 
-# ----------------------------------------------------------------------
-# Core mathematics
-# ----------------------------------------------------------------------
+# ======================================================================
+# ACTIVATIONS AND LOSS
+# ======================================================================
+def relu(z):
+    return np.maximum(0.0, z)
+
+
+def relu_derivative(z):
+    return (z > 0).astype(float)
+
+
 def softmax(Z):
     Z = Z - Z.max(axis=1, keepdims=True)
     E = np.exp(Z)
     return E / E.sum(axis=1, keepdims=True)
+
+
+def cross_entropy(P, Y):
+    return float(-np.sum(Y * np.log(P + 1e-12)) / Y.shape[0])
 
 
 def one_hot(y, C=10):
@@ -165,183 +166,161 @@ def one_hot(y, C=10):
     return Y
 
 
-def im2col(X, k, pad):
-    """(N,C,H,W) -> (N*Ho*Wo, C*k*k) with each row one receptive field."""
-    N, C, H, W = X.shape
-    Xp = np.pad(X, ((0, 0), (0, 0), (pad, pad), (pad, pad)))
-    Ho, Wo = H + 2 * pad - k + 1, W + 2 * pad - k + 1
-    s = Xp.strides
-    view = np.lib.stride_tricks.as_strided(
-        Xp, shape=(N, C, Ho, Wo, k, k),
-        strides=(s[0], s[1], s[2], s[3], s[2], s[3]), writeable=False)
-    return view.transpose(0, 2, 3, 1, 4, 5).reshape(N * Ho * Wo, C * k * k), Ho, Wo
-
-
-def col2im(cols, shape, k, pad, Ho, Wo):
-    """Adjoint of im2col: scatter-ADD the patch gradients back to image pixels."""
-    N, C, H, W = shape
-    Xp = np.zeros((N, C, H + 2 * pad, W + 2 * pad))
-    c = cols.reshape(N, Ho, Wo, C, k, k).transpose(0, 3, 4, 5, 1, 2)
-    for u in range(k):
-        for v in range(k):
-            Xp[:, :, u:u + Ho, v:v + Wo] += c[:, :, u, v]
-    return Xp[:, :, pad:pad + H, pad:pad + W] if pad else Xp
-
-
+# ======================================================================
+# CONVOLUTION AND POOLING
+# ======================================================================
 class Conv:
-    def __init__(self, C_in, F, k, pad, rng):
-        self.k, self.pad, self.F = k, pad, F
-        fan_in = C_in * k * k
-        self.W = rng.standard_normal((F, fan_in)) * np.sqrt(2.0 / fan_in)  # He init
-        self.b = np.zeros(F)
-        self.vW, self.vb = np.zeros_like(self.W), np.zeros_like(self.b)
+    """3x3 convolution with padding 1, so the output has the same H and W."""
 
-    def forward(self, X):
-        self.shape = X.shape
-        cols, Ho, Wo = im2col(X, self.k, self.pad)
-        self.cols, self.Ho, self.Wo = cols, Ho, Wo
-        Z = cols @ self.W.T + self.b                       # (N*Ho*Wo, F)
-        return Z.reshape(X.shape[0], Ho, Wo, self.F).transpose(0, 3, 1, 2)
+    def __init__(self, channels_in, n_filters, rng, k=3, pad=1):
+        self.k, self.pad = k, pad
+        fan_in = channels_in * k * k
+        self.W = rng.standard_normal((n_filters, channels_in, k, k)) * np.sqrt(2.0 / fan_in)
+        self.b = np.zeros(n_filters)
 
-    def backward(self, dZ, lam=0.0):
-        d = dZ.transpose(0, 2, 3, 1).reshape(-1, self.F)
-        self.gW = d.T @ self.cols + 2 * lam * self.W       # summed over positions
-        self.gb = d.sum(axis=0)
-        dcols = d @ self.W
-        return col2im(dcols, self.shape, self.k, self.pad, self.Ho, self.Wo)
+    def forward(self, A):
+        """Slide every filter over the image and accumulate."""
+        self.A = A
+        B, C, H, Wd = A.shape
+        F, k, pad = self.W.shape[0], self.k, self.pad
+        A_pad = np.pad(A, ((0, 0), (0, 0), (pad, pad), (pad, pad)))
+        Z = np.zeros((B, F, H, Wd))
+        for u in range(k):                    # loop over the 3 rows of the filter
+            for v in range(k):                # loop over the 3 columns
+                # the patch of the image that this filter entry multiplies
+                patch = A_pad[:, :, u:u + H, v:v + Wd]
+                # for every filter f: sum over the input channels c
+                Z += np.einsum("fc,bcij->bfij", self.W[:, :, u, v], patch)
+        return Z + self.b.reshape(1, -1, 1, 1)
 
-    def step(self, eta, mu):
-        self.vW = mu * self.vW - eta * self.gW
-        self.vb = mu * self.vb - eta * self.gb
-        self.W += self.vW
-        self.b += self.vb
+    def backward(self, dZ):
+        """Gradients of the filters, the bias, and the input."""
+        B, C, H, Wd = self.A.shape
+        k, pad = self.k, self.pad
+        A_pad = np.pad(self.A, ((0, 0), (0, 0), (pad, pad), (pad, pad)))
+        dA_pad = np.zeros_like(A_pad)
+        self.dW = np.zeros_like(self.W)
+        self.db = dZ.sum(axis=(0, 2, 3))
+        for u in range(k):
+            for v in range(k):
+                patch = A_pad[:, :, u:u + H, v:v + Wd]
+                # one filter weight is used at every position, so we sum over
+                # the batch and over all positions
+                self.dW[:, :, u, v] = np.einsum("bfij,bcij->fc", dZ, patch)
+                # send the gradient back to the pixels this weight multiplied
+                dA_pad[:, :, u:u + H, v:v + Wd] += np.einsum(
+                    "fc,bfij->bcij", self.W[:, :, u, v], dZ)
+        return dA_pad[:, :, pad:pad + H, pad:pad + Wd]
+
+    def update(self, eta):
+        self.W -= eta * self.dW
+        self.b -= eta * self.db
 
 
 class Dense:
     def __init__(self, n_in, n_out, rng):
         self.W = rng.standard_normal((n_in, n_out)) * np.sqrt(2.0 / n_in)
         self.b = np.zeros(n_out)
-        self.vW, self.vb = np.zeros_like(self.W), np.zeros_like(self.b)
 
     def forward(self, A):
         self.A = A
         return A @ self.W + self.b
 
-    def backward(self, dZ, lam=0.0):
-        self.gW = self.A.T @ dZ + 2 * lam * self.W
-        self.gb = dZ.sum(axis=0)
+    def backward(self, dZ):
+        self.dW = self.A.T @ dZ
+        self.db = dZ.sum(axis=0)
         return dZ @ self.W.T
 
-    def step(self, eta, mu):
-        self.vW = mu * self.vW - eta * self.gW
-        self.vb = mu * self.vb - eta * self.gb
-        self.W += self.vW
-        self.b += self.vb
+    def update(self, eta):
+        self.W -= eta * self.dW
+        self.b -= eta * self.db
 
 
-def maxpool_forward(X, k=2):
-    N, C, H, W = X.shape
-    Xr = X.reshape(N, C, H // k, k, W // k, k)
-    out = Xr.max(axis=(3, 5))
-    mask = (Xr == out[:, :, :, None, :, None])            # arg-max indicator
-    return out, mask
+def maxpool_forward(A):
+    """2x2 max pooling: take the biggest of the four values in each block."""
+    top_left = A[:, :, 0::2, 0::2]
+    top_right = A[:, :, 0::2, 1::2]
+    bottom_left = A[:, :, 1::2, 0::2]
+    bottom_right = A[:, :, 1::2, 1::2]
+    out = np.maximum(np.maximum(top_left, top_right),
+                     np.maximum(bottom_left, bottom_right))
+    return out
 
 
-def maxpool_backward(dout, mask, k=2):
-    N, C, Ho, Wo = dout.shape
-    d = mask * dout[:, :, :, None, :, None]               # route to the arg-max
-    d = d / np.maximum(1, mask.sum(axis=(3, 5))[:, :, :, None, :, None])  # split ties
-    return d.reshape(N, C, Ho * k, Wo * k)
+def maxpool_backward(dOut, A):
+    """Send the gradient only to the position that held the maximum."""
+    out = maxpool_forward(A)
+    dA = np.zeros_like(A)
+    # winners[...] is True where the value equalled the block maximum
+    dA[:, :, 0::2, 0::2] = (A[:, :, 0::2, 0::2] == out) * dOut
+    dA[:, :, 0::2, 1::2] = (A[:, :, 0::2, 1::2] == out) * dOut
+    dA[:, :, 1::2, 0::2] = (A[:, :, 1::2, 0::2] == out) * dOut
+    dA[:, :, 1::2, 1::2] = (A[:, :, 1::2, 1::2] == out) * dOut
+    return dA
 
 
+# ======================================================================
+# THE NETWORK
+# ======================================================================
 class CNN:
     def __init__(self, seed=0, f1=16, f2=32, hidden=128):
         rng = np.random.default_rng(seed)
-        self.c1 = Conv(3, f1, 3, 1, rng)
-        self.c2 = Conv(f1, f2, 3, 1, rng)
-        self.d1 = Dense(f2 * 8 * 8, hidden, rng)
-        self.d2 = Dense(hidden, 10, rng)
-        self.layers = [self.c1, self.c2, self.d1, self.d2]
+        self.conv1 = Conv(3, f1, rng)
+        self.conv2 = Conv(f1, f2, rng)
+        self.dense1 = Dense(f2 * 8 * 8, hidden, rng)
+        self.dense2 = Dense(hidden, 10, rng)
+        self.layers = [self.conv1, self.conv2, self.dense1, self.dense2]
 
     def forward(self, X):
-        self.z1 = self.c1.forward(X)
-        self.a1 = np.maximum(0.0, self.z1)
-        self.p1, self.m1 = maxpool_forward(self.a1)
-        self.z2 = self.c2.forward(self.p1)
-        self.a2 = np.maximum(0.0, self.z2)
-        self.p2, self.m2 = maxpool_forward(self.a2)
-        self.flat = self.p2.reshape(len(X), -1)
-        self.z3 = self.d1.forward(self.flat)
-        self.a3 = np.maximum(0.0, self.z3)
-        return softmax(self.d2.forward(self.a3))
+        self.z1 = self.conv1.forward(X)         # convolution 1
+        self.a1 = relu(self.z1)                 # ReLU
+        self.p1 = maxpool_forward(self.a1)      # 2x2 max pooling
+        self.z2 = self.conv2.forward(self.p1)   # convolution 2
+        self.a2 = relu(self.z2)
+        self.p2 = maxpool_forward(self.a2)
+        self.flat = self.p2.reshape(len(X), -1)  # flatten for the dense layers
+        self.z3 = self.dense1.forward(self.flat)
+        self.a3 = relu(self.z3)
+        return softmax(self.dense2.forward(self.a3))
 
-    def backward(self, P, Y, lam=0.0):
+    def backward(self, P, Y):
         B = len(Y)
-        d = (P - Y) / B                                    # softmax + CCE
-        d = self.d2.backward(d, lam)
-        d = d * (self.z3 > 0)
-        d = self.d1.backward(d, lam).reshape(self.p2.shape)
-        d = maxpool_backward(d, self.m2)
-        d = d * (self.z2 > 0)
-        d = self.c2.backward(d, lam)
-        d = maxpool_backward(d, self.m1)
-        d = d * (self.z1 > 0)
-        self.c1.backward(d, lam)
+        delta = (P - Y) / B                          # softmax + cross-entropy
+        delta = self.dense2.backward(delta)
+        delta = delta * relu_derivative(self.z3)     # through the ReLU
+        delta = self.dense1.backward(delta)
+        delta = delta.reshape(self.p2.shape)         # undo the flatten
+        delta = maxpool_backward(delta, self.a2)     # through the pooling
+        delta = delta * relu_derivative(self.z2)
+        delta = self.conv2.backward(delta)
+        delta = maxpool_backward(delta, self.a1)
+        delta = delta * relu_derivative(self.z1)
+        self.conv1.backward(delta)
 
-    def step(self, eta, mu):
-        for l in self.layers:
-            l.step(eta, mu)
+    def update(self, eta):
+        for layer in self.layers:
+            layer.update(eta)
 
     def predict(self, X, batch=500):
-        return np.vstack([self.forward(X[i:i + batch]) for i in range(0, len(X), batch)])
+        return np.vstack([self.forward(X[i:i + batch])
+                          for i in range(0, len(X), batch)])
 
 
-def loss_fn(P, Y):
-    return float(-np.sum(Y * np.log(P + 1e-12)) / len(Y))
-
-
-def gradient_check(net, X, Y, eps=1e-5, n=10, seed=0):
-    rng = np.random.default_rng(seed)
-    P = net.forward(X)
-    net.backward(P, Y)
-    errs = {}
-    for name, layer in [("conv1", net.c1), ("conv2", net.c2),
-                        ("dense1", net.d1), ("dense2", net.d2)]:
-        e = []
-        for _ in range(n):
-            i = rng.integers(layer.W.shape[0])
-            j = rng.integers(layer.W.shape[1])
-            old = layer.W[i, j]
-            layer.W[i, j] = old + eps
-            lp = loss_fn(net.forward(X), Y)
-            layer.W[i, j] = old - eps
-            lm = loss_fn(net.forward(X), Y)
-            layer.W[i, j] = old
-            num = (lp - lm) / (2 * eps)
-            ana = layer.gW[i, j]
-            e.append(abs(num - ana) / max(1e-12, abs(num) + abs(ana)))
-        errs[name] = float(np.max(e))
-    return errs
-
-
-def confusion(y, yhat, C=10):
+def confusion_matrix(y_true, y_pred, C=10):
     M = np.zeros((C, C), dtype=int)
-    for t, p in zip(y, yhat):
+    for t, p in zip(y_true, y_pred):
         M[t, p] += 1
     return M
 
 
-# ----------------------------------------------------------------------
+# ======================================================================
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--epochs", type=int, default=12)
+    ap.add_argument("--epochs", type=int, default=8)
     ap.add_argument("--batch", type=int, default=128)
-    ap.add_argument("--eta", type=float, default=0.01)
-    ap.add_argument("--momentum", type=float, default=0.9)
-    ap.add_argument("--lam", type=float, default=1e-5)
-    ap.add_argument("--decay", type=float, default=0.92)
-    ap.add_argument("--n-train", type=int, default=12000,
-                    help="training subset size (50000 = full set, much slower)")
+    ap.add_argument("--eta", type=float, default=0.05)
+    ap.add_argument("--n-train", type=int, default=10000,
+                    help="training subset (50000 = full set, much slower)")
     ap.add_argument("--n-test", type=int, default=5000)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -359,10 +338,9 @@ def main():
     y = ytr_all[tr]
     Xte = Xte_all[te].astype(np.float64) / 255.0
     yte = yte_all[te]
-    # per-channel standardisation using training statistics only
-    mu = X.mean(axis=(0, 2, 3), keepdims=True)
-    sd = X.std(axis=(0, 2, 3), keepdims=True)
-    X, Xte = (X - mu) / sd, (Xte - mu) / sd
+    mean = X.mean(axis=(0, 2, 3), keepdims=True)
+    std = X.std(axis=(0, 2, 3), keepdims=True)
+    X, Xte = (X - mean) / std, (Xte - mean) / std
     n_val = max(1000, args.n_train // 10)
     Xva, yva, X, y = X[:n_val], y[:n_val], X[n_val:], y[n_val:]
     Y, Yva, Yte = one_hot(y), one_hot(yva), one_hot(yte)
@@ -370,96 +348,84 @@ def main():
     net = CNN(seed=args.seed)
     n_par = sum(l.W.size + l.b.size for l in net.layers)
     print(f"Train / validation / test : {len(X)} / {len(Xva)} / {len(Xte)}"
-          f"   (subset of 50000 / 10000)")
-    print(f"Input 3x32x32, per-channel standardised; mean RGB = "
-          f"{np.round(mu.ravel()*255, 1).tolist()}")
-    print("Architecture : conv(16,3x3)-ReLU-pool -> conv(32,3x3)-ReLU-pool "
-          "-> dense(128)-ReLU -> dense(10)-softmax")
-    print(f"Parameters   : {n_par:,}   "
-          f"(conv1 {net.c1.W.size + net.c1.b.size}, conv2 "
-          f"{net.c2.W.size + net.c2.b.size}, dense1 {net.d1.W.size + net.d1.b.size}, "
-          f"dense2 {net.d2.W.size + net.d2.b.size})")
-    print(f"Optimiser    : SGD, batch = {args.batch}, eta0 = {args.eta}, "
-          f"momentum = {args.momentum}, decay = {args.decay}/epoch")
+          "   (subset of 50000 / 10000)")
+    print("Architecture: conv(16) - ReLU - pool - conv(32) - ReLU - pool "
+          "- dense(128) - ReLU - dense(10) - softmax")
+    print(f"Parameters  : {n_par:,} "
+          f"(only {net.conv1.W.size + net.conv2.W.size:,} of them are filter weights)")
+    print(f"Training    : mini-batch gradient descent, batch = {args.batch}, "
+          f"eta = {args.eta}")
     print()
 
     print("-" * 72)
-    print("(a) GRADIENT CHECK of every layer (mini-batch of 8 images)")
+    print("TRAINING")
     print("-" * 72)
-    errs = gradient_check(CNN(seed=args.seed), X[:8], Y[:8], seed=args.seed)
-    for k, v in errs.items():
-        print(f"   {k:>8}: max relative error = {v:.3e}")
-    print("   (this verifies im2col/col2im, the max-pool routing and the")
-    print("    softmax+cross-entropy delta all at once)")
-    print()
-
-    print("-" * 72)
-    print("(b) TRAINING")
-    print("-" * 72)
-    print(f"{'epoch':>6}{'train loss':>13}{'train acc':>11}{'val loss':>11}"
-          f"{'val acc':>10}{'eta':>9}{'sec':>8}")
-    hist = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
-    eta = args.eta
-    for ep in range(1, args.epochs + 1):
+    print(f"{'epoch':>6}{'train loss':>13}{'train acc':>11}"
+          f"{'val loss':>11}{'val acc':>10}{'sec':>8}")
+    history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
+    for epoch in range(1, args.epochs + 1):
         t0 = time.time()
         order = rng.permutation(len(X))
-        rl, rc, seen = 0.0, 0, 0
-        for s in range(0, len(X), args.batch):
-            idx = order[s:s + args.batch]
-            P = net.forward(X[idx])
-            net.backward(P, Y[idx], args.lam)
-            net.step(eta, args.momentum)
-            rl += loss_fn(P, Y[idx]) * len(idx)
-            rc += int(np.sum(np.argmax(P, 1) == y[idx]))
+        total_loss, correct, seen = 0.0, 0, 0
+        for start in range(0, len(X), args.batch):
+            idx = order[start:start + args.batch]
+            P = net.forward(X[idx])               # forward
+            net.backward(P, Y[idx])               # backward (chain rule)
+            net.update(args.eta)                  # gradient descent step
+            total_loss += cross_entropy(P, Y[idx]) * len(idx)
+            correct += int(np.sum(np.argmax(P, axis=1) == y[idx]))
             seen += len(idx)
         Pva = net.predict(Xva)
-        vl, va = loss_fn(Pva, Yva), float(np.mean(np.argmax(Pva, 1) == yva))
-        hist["train_loss"].append(rl / seen)
-        hist["train_acc"].append(rc / seen)
-        hist["val_loss"].append(vl)
-        hist["val_acc"].append(va)
-        print(f"{ep:>6}{rl/seen:13.5f}{rc/seen:11.4f}{vl:11.5f}{va:10.4f}"
-              f"{eta:9.4f}{time.time()-t0:8.1f}")
-        eta *= args.decay
+        vloss = cross_entropy(Pva, Yva)
+        vacc = float(np.mean(np.argmax(Pva, axis=1) == yva))
+        history["train_loss"].append(total_loss / seen)
+        history["train_acc"].append(correct / seen)
+        history["val_loss"].append(vloss)
+        history["val_acc"].append(vacc)
+        print(f"{epoch:>6}{total_loss/seen:13.5f}{correct/seen:11.4f}"
+              f"{vloss:11.5f}{vacc:10.4f}{time.time()-t0:8.1f}")
     print()
 
     Pte = net.predict(Xte)
-    yhat = np.argmax(Pte, 1)
-    acc = float(np.mean(yhat == yte))
-    M = confusion(yte, yhat)
+    y_pred = np.argmax(Pte, axis=1)
+    accuracy = float(np.mean(y_pred == yte))
+    M = confusion_matrix(yte, y_pred)
     print("-" * 72)
-    print("(c) TEST PERFORMANCE")
+    print("TEST PERFORMANCE")
     print("-" * 72)
-    print(f"Test cross-entropy = {loss_fn(Pte, Yte):.5f}")
-    print(f"Test accuracy      = {acc:.4f}   (chance = 0.1000)")
+    print(f"Test cross-entropy = {cross_entropy(Pte, Yte):.5f}")
+    print(f"Test accuracy      = {accuracy:.4f}   (random guessing = 0.1000)")
     print("\nPer-class precision / recall / F1:")
-    per = {}
-    for i, c in enumerate(CLASSES):
+    per_class = {}
+    for i, name in enumerate(CLASSES):
         tp = M[i, i]
-        pr = tp / M[:, i].sum() if M[:, i].sum() else 0.0
-        rc_ = tp / M[i].sum() if M[i].sum() else 0.0
-        f1 = 2 * pr * rc_ / (pr + rc_) if pr + rc_ else 0.0
-        per[c] = {"precision": float(pr), "recall": float(rc_), "f1": float(f1)}
-        print(f"   {c:>11}: precision = {pr:.4f}, recall = {rc_:.4f}, F1 = {f1:.4f}")
+        precision = tp / M[:, i].sum() if M[:, i].sum() else 0.0
+        recall = tp / M[i].sum() if M[i].sum() else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+        per_class[name] = {"precision": float(precision), "recall": float(recall),
+                           "f1": float(f1)}
+        print(f"   {name:>11}: precision = {precision:.4f}, "
+              f"recall = {recall:.4f}, F1 = {f1:.4f}")
     off = M - np.diag(np.diag(M))
     i, j = np.unravel_index(np.argmax(off), off.shape)
-    print(f"\nMost frequent confusion: true '{CLASSES[i]}' predicted as "
+    print(f"\nMost frequent mistake: true '{CLASSES[i]}' predicted as "
           f"'{CLASSES[j]}' ({off[i, j]} times)")
     print()
 
     ep = np.arange(1, args.epochs + 1)
     fig, ax = plt.subplots(1, 2, figsize=(10, 4))
-    ax[0].plot(ep, hist["train_loss"], "o-", ms=3, label="train")
-    ax[0].plot(ep, hist["val_loss"], "s-", ms=3, label="validation")
+    ax[0].plot(ep, history["train_loss"], "o-", ms=3, label="train")
+    ax[0].plot(ep, history["val_loss"], "s-", ms=3, label="validation")
+    ax[0].axhline(np.log(10), color="gray", ls=":", lw=1, label=r"$\log 10$")
     ax[0].set_xlabel("epoch")
     ax[0].set_ylabel("cross-entropy")
     ax[0].set_title("Loss")
     ax[0].legend()
     ax[0].grid(alpha=0.3)
-    ax[1].plot(ep, hist["train_acc"], "o-", ms=3, label="train")
-    ax[1].plot(ep, hist["val_acc"], "s-", ms=3, label="validation")
-    ax[1].axhline(acc, color="crimson", ls="--", lw=1, label=f"test = {acc:.4f}")
-    ax[1].axhline(0.1, color="gray", ls=":", lw=1, label="chance")
+    ax[1].plot(ep, history["train_acc"], "o-", ms=3, label="train")
+    ax[1].plot(ep, history["val_acc"], "s-", ms=3, label="validation")
+    ax[1].axhline(accuracy, color="crimson", ls="--", lw=1,
+                  label=f"test = {accuracy:.4f}")
     ax[1].set_xlabel("epoch")
     ax[1].set_ylabel("accuracy")
     ax[1].set_title("Accuracy")
@@ -480,7 +446,7 @@ def main():
                     color="white" if M[a, b] > M.max() / 2 else "black")
     ax.set_xlabel("predicted")
     ax.set_ylabel("true")
-    ax.set_title(f"CIFAR-10 test confusion matrix (acc = {acc:.4f})")
+    ax.set_title(f"CIFAR-10 test confusion matrix (accuracy = {accuracy:.4f})")
     fig.colorbar(im, fraction=0.046)
     fig.tight_layout()
     f2p = os.path.join(FIGDIR, "07_cifar10_confusion.pdf")
@@ -488,13 +454,11 @@ def main():
     plt.close(fig)
 
     fig, axes = plt.subplots(2, 8, figsize=(9, 2.8))
-    W1 = net.c1.W.reshape(-1, 3, 3, 3)
     for k, a in enumerate(axes.ravel()):
-        f = W1[k].transpose(1, 2, 0)
+        f = net.conv1.W[k].transpose(1, 2, 0)
         a.imshow((f - f.min()) / (f.max() - f.min() + 1e-12))
         a.axis("off")
-    fig.suptitle("Learned conv1 filters (16 x 3x3x3, contrast normalised)",
-                 fontsize=10)
+    fig.suptitle("The 16 learned 3x3 filters of the first layer", fontsize=10)
     fig.tight_layout()
     f3p = os.path.join(FIGDIR, "07_cifar10_filters.pdf")
     fig.savefig(f3p)
@@ -503,12 +467,12 @@ def main():
     with open(os.path.join(RESDIR, "07_cifar10.json"), "w") as fh:
         json.dump({"parameters": int(n_par), "n_train": int(len(X)),
                    "n_val": int(len(Xva)), "n_test": int(len(Xte)),
-                   "epochs": args.epochs, "batch": args.batch, "eta0": args.eta,
-                   "grad_check": errs, "test_acc": acc,
-                   "test_ce": loss_fn(Pte, Yte),
-                   "final_train_acc": hist["train_acc"][-1],
-                   "final_val_acc": hist["val_acc"][-1],
-                   "history": hist, "confusion": M.tolist(), "per_class": per,
+                   "epochs": args.epochs, "batch": args.batch, "eta": args.eta,
+                   "test_acc": accuracy, "test_ce": cross_entropy(Pte, Yte),
+                   "final_train_acc": history["train_acc"][-1],
+                   "final_val_acc": history["val_acc"][-1],
+                   "history": history, "confusion": M.tolist(),
+                   "per_class": per_class,
                    "worst_confusion": [CLASSES[i], CLASSES[j], int(off[i, j])]},
                   fh, indent=2)
     for f in (f1p, f2p, f3p):
