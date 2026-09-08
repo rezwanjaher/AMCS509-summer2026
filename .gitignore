@@ -1,0 +1,26 @@
+# --- virtual environment (never commit; it is machine-specific and huge)
+venv/
+.venv/
+env/
+
+# --- cached datasets, re-downloaded automatically by the scripts (~300 MB)
+data/
+datasets/
+
+# --- LaTeX build artefacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# --- Python / notebook noise
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# --- OS noise
+Thumbs.db
+.DS_Store

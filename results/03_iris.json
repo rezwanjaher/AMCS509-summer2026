@@ -1,0 +1,46 @@
+{
+  "train_acc": 0.9809523809523809,
+  "test_acc": 1.0,
+  "train_ce": 0.07333011605916524,
+  "test_ce": 0.044503488038626096,
+  "grad_check_max_err": 1.3718337577017792e-10,
+  "confusion": [
+    [
+      15,
+      0,
+      0
+    ],
+    [
+      0,
+      15,
+      0
+    ],
+    [
+      0,
+      0,
+      15
+    ]
+  ],
+  "per_class": {
+    "setosa": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    "versicolor": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    "virginica": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    }
+  },
+  "classes": [
+    "setosa",
+    "versicolor",
+    "virginica"
+  ]
+}

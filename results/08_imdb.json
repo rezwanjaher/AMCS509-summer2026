@@ -1,0 +1,105 @@
+{
+  "parameters": 1284225,
+  "vocab": 20000,
+  "dim": 64,
+  "hidden": 64,
+  "max_len": 400,
+  "epochs": 6,
+  "eta": 0.05,
+  "n_train": 25000,
+  "n_val": 5000,
+  "n_test": 20000,
+  "token_coverage": 0.972333961509323,
+  "mean_length": 233.80718,
+  "grad_check": {
+    "E": 0.0,
+    "W1": 4.256332065237172e-06,
+    "b1": 3.9058917286979106e-08,
+    "W2": 7.221754409360045e-07,
+    "b2": 1.9415520248998397e-10
+  },
+  "test_acc": 0.88465,
+  "test_bce": 0.28036971829299306,
+  "precision": 0.9134420637458693,
+  "recall": 0.8514507154213037,
+  "f1": 0.8813576754949858,
+  "auc": 0.9548970825845027,
+  "confusion": {
+    "tp": 8569,
+    "fp": 812,
+    "fn": 1495,
+    "tn": 9124
+  },
+  "best_epoch": 1,
+  "best_val_loss": 0.2670788061222346,
+  "final_train_acc": 0.99468,
+  "final_val_acc": 0.8774,
+  "history": {
+    "train_loss": [
+      0.3293862963052129,
+      0.17216895717707295,
+      0.1136463486561962,
+      0.0720387797502901,
+      0.04130269815817915,
+      0.022904069811858288
+    ],
+    "train_acc": [
+      0.85396,
+      0.93776,
+      0.96292,
+      0.97896,
+      0.9894,
+      0.99468
+    ],
+    "val_loss": [
+      0.2670788061222346,
+      0.27516856217012853,
+      0.3088529943050667,
+      0.3517123077239505,
+      0.4281392695486615,
+      0.46552442672006766
+    ],
+    "val_acc": [
+      0.8884,
+      0.8874,
+      0.8848,
+      0.8814,
+      0.8768,
+      0.8774
+    ]
+  },
+  "most_negative": [
+    "worst",
+    "waste",
+    "terrible",
+    "awful",
+    "dull",
+    "poorly",
+    "boring",
+    "poor",
+    "disappointing",
+    "fails",
+    "disappointment",
+    "horrible",
+    "pointless",
+    "lacks",
+    "worse"
+  ],
+  "most_positive": [
+    "excellent",
+    "perfect",
+    "amazing",
+    "wonderful",
+    "hilarious",
+    "favorite",
+    "great",
+    "highly",
+    "refreshing",
+    "brilliant",
+    "powerful",
+    "beautifully",
+    "superb",
+    "wonderfully",
+    "believable"
+  ]
+}
